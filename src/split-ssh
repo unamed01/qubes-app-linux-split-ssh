@@ -6,12 +6,14 @@ usage() {
 usage: split-ssh list <agent>
        split-ssh add <agent> [ssh-add args...]
        split-ssh reload <agent>
+       split-ssh enroll <agent> <ssh_private_key>
 
   list             list keys held by <agent>
   add (no args)    scan ~/.ssh/identities.d/<agent>/ and load every key
                    (respects per-key <key>.ssh-add-option)
   add <args...>    pass arguments straight to ssh-add (ad-hoc one-off)
   reload           ssh-add -D, then re-scan the directory
+  enroll <args...> creates new agent and moves specified key into it, e.g: enroll main .ssh/id_ed25519
 EOF
     exit 1
 }
@@ -37,6 +39,35 @@ require_sock() {
         echo "agent '$agent' not running (start split-ssh-agent@${agent}.service)" >&2
         exit 1
     }
+}
+
+create_agent_from_key() {
+  key="$1"
+  key="${key%.pub}"
+  
+  [ -f "$key" ] && grep -q -- "PRIVATE KEY-----" "$key" 2>/dev/null || {
+    echo "file '$key' doesn't exist or isn't a valid ssh private key."
+    exit 1
+  }
+  mkdir -p "$keydir"
+  cp "$key" "$keydir"
+  sudo systemctl start split-ssh-agent@"${agent}".service
+  i=0
+  while [ ! -S "$sock" ] && [ $i -lt 20 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  require_sock
+  load_from_dir
+  echo "do you want the new agent for $key to start as soon as vm does? [y/n]"
+  read -r answer
+  [ "$answer" = "y" ] || [ "$answer" = "Y" ] && {
+    echo "#Qubes split-ssh config start#" | sudo tee -a /rw/config/rc.local
+    echo "systemctl start split-ssh-agent@${agent}.service" | sudo tee -a  /rw/config/rc.local
+    echo "#Qubes split-ssh config end#" | sudo tee -a  /rw/config/rc.local
+  }
+  echo successfully created agent: "$agent", with key: "$key".
+  exit 0
 }
 
 load_from_dir() {
@@ -69,6 +100,9 @@ case "$cmd" in
     list)
         require_sock
         SSH_AUTH_SOCK="$sock" exec ssh-add -l
+        ;;
+    enroll) 
+        create_agent_from_key "$1"
         ;;
     add)
         require_sock
